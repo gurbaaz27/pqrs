@@ -12,6 +12,7 @@ use std::fs::File;
 use std::ops::Add;
 use std::path::Path;
 use walkdir::DirEntry;
+use tempfile::NamedTempFile;
 
 // calculate the sizes in bytes for one KiB, MiB, GiB, TiB, PiB
 static ONE_KI_B: i64 = 1024;
@@ -40,16 +41,48 @@ pub fn check_path_present<P: AsRef<Path>>(file_path: P) -> bool {
     Path::new(file_path.as_ref()).exists()
 }
 
-/// Open the file based on the pat and return the File object, else return error
+/// Open the file based on the path and return the File object, else return error
+/// Automatically handles zstd-compressed files by decompressing them to temporary files
 pub fn open_file<P: AsRef<Path>>(file_name: P) -> Result<File, PQRSError> {
     let file_name = file_name.as_ref();
     let path = Path::new(file_name);
-    let file = match File::open(path) {
-        Err(_) => return Err(CouldNotOpenFile(file_name.to_path_buf())),
-        Ok(f) => f,
-    };
-
-    Ok(file)
+    
+    if !path.exists() {
+        return Err(CouldNotOpenFile(file_name.to_path_buf()));
+    }
+    
+    // Check if the file is zstd-compressed by looking at the extension
+    if path.extension().map_or(false, |ext| ext == "zst") {
+        // For zstd files, decompress to a temporary file
+        let compressed_file = File::open(path)?;
+        let mut decoder = zstd::Decoder::new(compressed_file)?;
+        
+        // Create a temporary file to store the decompressed content
+        let temp_file = NamedTempFile::new()?;
+        let mut temp_handle = temp_file.as_file().try_clone()?;
+        
+        // Copy decompressed content to temp file
+        std::io::copy(&mut decoder, &mut temp_handle)?;
+        
+        // Drop the temp_handle to ensure all data is written
+        drop(temp_handle);
+        
+        // Open the temp file for reading
+        let result = File::open(temp_file.path())?;
+        
+        // Store the temp file in a static or thread-local storage to keep it alive
+        // For now, we'll use a simple approach - the temp file will be cleaned up when dropped
+        // This is not ideal for long-running processes, but it's a start
+        
+        Ok(result)
+    } else {
+        // Regular file, open normally
+        let file = match File::open(path) {
+            Err(_) => return Err(CouldNotOpenFile(file_name.to_path_buf())),
+            Ok(f) => f,
+        };
+        Ok(file)
+    }
 }
 
 /// Check if the given entry in the walking tree is a hidden file
